@@ -67,6 +67,8 @@ declare global {
       getCurrentTime(): number
       getDuration(): number
       getPlayerState(): number
+      setVolume(volume: number): void
+      getVolume(): number
       destroy(): void
     }
   }
