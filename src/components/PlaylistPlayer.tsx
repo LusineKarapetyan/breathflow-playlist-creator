@@ -36,6 +36,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
   const [currentPlayerOpacity, setCurrentPlayerOpacity] = useState(1)
   const [nextPlayerOpacity, setNextPlayerOpacity] = useState(0)
   const [nextTrack, setNextTrack] = useState<{ sectionIndex: number; trackIndex: number } | null>(null)
+  const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [containersSwapped, setContainersSwapped] = useState(false) // Track if containers are swapped after transition
   const playerRef = useRef<YT.Player | null>(null)
   const nextPlayerRef = useRef<YT.Player | null>(null)
@@ -242,7 +243,6 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                       // Find which container each iframe belongs to
                       allIframes.forEach((iframe, idx) => {
                         const src = iframe.src || ''
-                        const container = iframe.closest('div[class*="absolute"]') || iframe.parentElement
                         const isInNext = nextContainer.contains(iframe)
                         const isInCurrent = currentContainer.contains(iframe)
                         console.log(`    Iframe ${idx}: in nextContainer=${isInNext}, in currentContainer=${isInCurrent}, src=${src.substring(0, 60)}`)
@@ -250,7 +250,6 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                       
                       // Find iframes by checking which container contains them
                       const nextIframe = allIframes.find(iframe => nextContainer.contains(iframe))
-                      const currentIframe = allIframes.find(iframe => currentContainer.contains(iframe))
                       
                       // The playing video (Track 2) should be in nextPlayerContainerRef
                       // Since playerRef.current points to Track 2 player, find its iframe
@@ -413,6 +412,8 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         
         videoDurationRef.current = duration
         videoCurrentTimeRef.current = currentTime
+        // Update playback state with current time for progress bar
+        setPlaybackState(prev => ({ ...prev, currentTime }))
 
         const timeRemaining = duration - currentTime
 
@@ -577,13 +578,15 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                     height: "100%",
                     width: "100%",
                     videoId: nextTrackData.videoId,
-                    playerVars: {
-                      autoplay: 1,
-                      controls: 1,
-                      rel: 0,
-                      modestbranding: 1,
-                      enablejsapi: 1,
-                    },
+            playerVars: {
+              autoplay: 1,
+              controls: 0,
+              rel: 0,
+              modestbranding: 1,
+              enablejsapi: 1,
+              iv_load_policy: 3,
+              showinfo: 0,
+            },
                     events: {
                       onReady: (event: YT.PlayerEvent) => {
                         console.log("Next player ready, starting fade in and playing")
@@ -695,10 +698,12 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
           videoId: track.videoId,
           playerVars: {
             autoplay: playbackState.isPlaying ? 1 : 0,
-            controls: 1,
+            controls: 0,
             rel: 0,
             modestbranding: 1,
             enablejsapi: 1,
+            iv_load_policy: 3,
+            showinfo: 0,
           },
           events: {
             onReady: (event: YT.PlayerEvent) => {
@@ -1024,6 +1029,38 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
     }
   }
 
+  const formatTime = (seconds: number): string => {
+    if (!seconds || isNaN(seconds)) return '0:00'
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
+  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!playerRef.current || videoDurationRef.current <= 0) return
+    
+    const rect = e.currentTarget.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const percentage = clickX / rect.width
+    const newTime = percentage * videoDurationRef.current
+    
+    try {
+      playerRef.current.seekTo(newTime, true)
+      videoCurrentTimeRef.current = newTime
+      setPlaybackState(prev => ({ ...prev, currentTime: newTime }))
+    } catch (error) {
+      console.error('Error seeking:', error)
+    }
+  }
+
+  const handleProgressHover = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (videoDurationRef.current <= 0) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const hoverX = e.clientX - rect.left
+    const percentage = Math.max(0, Math.min(100, (hoverX / rect.width) * 100))
+    setHoverTime(percentage)
+  }
+
   const allTracks: Array<{ track: Track; sectionTitle: string }> = []
   playlist.sections.forEach((section) => {
     section.tracks.forEach((track) => {
@@ -1040,49 +1077,70 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         <CardContent>
           {currentTrack ? (
             <div className="space-y-4">
-              <div className="aspect-video rounded-lg overflow-hidden bg-gray-100 relative">
+              {/* Hidden video players for audio-only playback */}
+              <div className="relative" style={{ height: '1px', overflow: 'hidden', position: 'absolute', visibility: 'hidden' }}>
                 {useFallback ? (
                   <iframe
                     className="w-full h-full"
-                    src={`https://www.youtube.com/embed/${currentTrack.videoId}?controls=1&rel=0&modestbranding=1`}
+                    src={`https://www.youtube.com/embed/${currentTrack.videoId}?controls=0&rel=0&modestbranding=1`}
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
                     title={currentTrack.title}
                   />
                 ) : (
                   <>
-                    {/* Current player */}
+                    {/* Current player - hidden, audio only */}
                     <div
                       ref={playerContainerRef}
                       className="w-full h-full absolute inset-0"
                       style={{ 
                         opacity: containersSwapped ? nextPlayerOpacity : currentPlayerOpacity, 
-                        zIndex: (containersSwapped ? nextPlayerOpacity : currentPlayerOpacity) > 0 ? 2 : 1,
-                        transition: 'opacity 0.1s ease-in-out',
-                        pointerEvents: (containersSwapped ? nextPlayerOpacity : currentPlayerOpacity) > 0 ? 'auto' : 'none',
-                        visibility: (containersSwapped ? nextPlayerOpacity : currentPlayerOpacity) > 0 ? 'visible' : 'hidden'
+                        height: '1px',
+                        width: '1px'
                       }}
-                      data-container="current"
-                      data-opacity={containersSwapped ? nextPlayerOpacity : currentPlayerOpacity}
-                      data-swapped={containersSwapped}
                     />
-                    {/* Next player (for crossfade) - always render but hidden */}
+                    {/* Next player (for crossfade) - hidden, audio only */}
                     <div
                       ref={nextPlayerContainerRef}
                       className="w-full h-full absolute inset-0"
                       style={{ 
-                        opacity: containersSwapped ? currentPlayerOpacity : nextPlayerOpacity, 
-                        zIndex: 2,
-                        transition: 'opacity 0.1s ease-in-out',
-                        pointerEvents: (containersSwapped ? currentPlayerOpacity : nextPlayerOpacity) > 0 ? 'auto' : 'none',
-                        visibility: (containersSwapped ? currentPlayerOpacity : nextPlayerOpacity) > 0 ? 'visible' : 'hidden'
+                        opacity: containersSwapped ? currentPlayerOpacity : nextPlayerOpacity,
+                        height: '1px',
+                        width: '1px'
                       }}
-                      data-container="next"
-                      data-opacity={containersSwapped ? currentPlayerOpacity : nextPlayerOpacity}
-                      data-swapped={containersSwapped}
                     />
                   </>
                 )}
+              </div>
+
+              {/* Custom Progress Bar */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm text-gray-600">
+                  <span>{formatTime(playbackState.currentTime)}</span>
+                  <span>{videoDurationRef.current > 0 ? formatTime(videoDurationRef.current) : '--:--'}</span>
+                </div>
+                <div 
+                  className="w-full h-2 bg-gray-200 rounded-full cursor-pointer relative group"
+                  onClick={handleProgressClick}
+                  onMouseMove={handleProgressHover}
+                  onMouseLeave={() => setHoverTime(null)}
+                >
+                  <div 
+                    className="h-full bg-indigo-600 rounded-full transition-all"
+                    style={{ width: `${(playbackState.currentTime / (videoDurationRef.current || 1)) * 100}%` }}
+                  />
+                  <div 
+                    className="absolute top-0 h-full w-1 bg-indigo-800 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ left: `${(playbackState.currentTime / (videoDurationRef.current || 1)) * 100}%`, transform: 'translateX(-50%)' }}
+                  />
+                  {hoverTime !== null && (
+                    <div 
+                      className="absolute top-full mt-2 px-2 py-1 bg-gray-800 text-white text-xs rounded pointer-events-none whitespace-nowrap"
+                      style={{ left: `${hoverTime}%`, transform: 'translateX(-50%)' }}
+                    >
+                      {formatTime((hoverTime / 100) * (videoDurationRef.current || 0))}
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div>
