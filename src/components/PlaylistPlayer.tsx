@@ -39,9 +39,9 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
 
   const [transitionCountdown, setTransitionCountdown] = useState<number | null>(null)
   const [useFallback, setUseFallback] = useState(false)
+  const [isTransitioning, setIsTransitioning] = useState(false)
   const [currentPlayerOpacity, setCurrentPlayerOpacity] = useState(1)
   const [nextPlayerOpacity, setNextPlayerOpacity] = useState(0)
-  const [nextTrack, setNextTrack] = useState<{ sectionIndex: number; trackIndex: number } | null>(null)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [containersSwapped, setContainersSwapped] = useState(false) // Track if containers are swapped after transition
   
@@ -55,6 +55,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
   const nextPlayerContainerRef = useRef<HTMLDivElement>(null)
   const fadeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const isTransitioningRef = useRef(false)
+  const hasFinalizedTransitionRef = useRef(false)
   const pendingNextTrackRef = useRef<{ sectionIndex: number; trackIndex: number } | null>(null)
   const handleVideoEndedRef = useRef<() => void>(() => {})
   const lastVideoIdRef = useRef<string | null>(null)
@@ -63,6 +64,79 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
   const isPlayingRef = useRef(true) // Track playing state to avoid closure issues
   const isCompletingTransitionRef = useRef(false) // Track when we're completing a transition to prevent reload
   const containersSwappedRef = useRef(false) // Keep ref in sync with containersSwapped state to avoid stale closures
+
+  const finalizeTransition = (reason: string) => {
+    if (hasFinalizedTransitionRef.current) {
+      return
+    }
+
+    const pending = pendingNextTrackRef.current
+    if (!pending) {
+      return
+    }
+    if (!nextPlayerRef.current) {
+      return
+    }
+
+    hasFinalizedTransitionRef.current = true
+    console.log("Finalizing transition:", reason, "→", pending.sectionIndex, pending.trackIndex)
+
+    // Stop fade timer if running
+    if (fadeTimerRef.current) {
+      clearInterval(fadeTimerRef.current)
+      fadeTimerRef.current = null
+    }
+
+    // Prevent the track-change effect from reloading while we swap
+    isCompletingTransitionRef.current = true
+
+    // Update lastVideoIdRef to the incoming track to avoid re-loads
+    const incomingTrack = playlist.sections[pending.sectionIndex]?.tracks[pending.trackIndex]
+    if (incomingTrack) {
+      lastVideoIdRef.current = incomingTrack.videoId
+    }
+
+    // Stop old player (it's faded out)
+    if (playerRef.current) {
+      try {
+        playerRef.current.pauseVideo()
+        playerRef.current.stopVideo()
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Swap refs: next becomes current
+    playerRef.current = nextPlayerRef.current
+    nextPlayerRef.current = null
+
+    // Reset state for next cycle
+    pendingNextTrackRef.current = null
+    isTransitioningRef.current = false
+    setIsTransitioning(false)
+
+    // Toggle container mapping so future transitions pick the correct container
+    setContainersSwapped(prev => !prev)
+
+    // Make sure UI opacities are reset
+    setCurrentPlayerOpacity(1)
+    setNextPlayerOpacity(0)
+
+    // Ensure playbackState matches what is now playing
+    setPlaybackState(prev => ({
+      currentSectionIndex: pending.sectionIndex,
+      currentTrackIndex: pending.trackIndex,
+      isPlaying: true,
+      currentTime: 0,
+      autoAdvance: prev.autoAdvance,
+    }))
+    isPlayingRef.current = true
+
+    // Clear completion guard shortly after commit
+    setTimeout(() => {
+      isCompletingTransitionRef.current = false
+    }, 500)
+  }
 
   const getCurrentTrack = (): Track | null => {
     const section = playlist.sections[playbackState.currentSectionIndex]
@@ -160,99 +234,11 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         return
       }
 
-      if (isTransitioningRef.current && nextTrack) {
-        // Transition is in progress, complete it
-        console.log("Video ended during transition, completing fade")
-        try {
-          // Complete the fade - current should be 0, next should be 1
-          setCurrentPlayerOpacity(0)
-          setNextPlayerOpacity(1)
-          
-          // Stop fade timer if running
-          if (fadeTimerRef.current) {
-            clearInterval(fadeTimerRef.current)
-            fadeTimerRef.current = null
-          }
-          
-          // Mark that we're completing transition to prevent reload
-          isCompletingTransitionRef.current = true
-          
-          // Get the next track's video ID to update lastVideoIdRef BEFORE swapping
-          const nextTrackData = playlist.sections[nextTrack.sectionIndex]?.tracks[nextTrack.trackIndex]
-          if (nextTrackData) {
-            lastVideoIdRef.current = nextTrackData.videoId
-          }
-          
-          // Stop the old (current) player - it's already faded out
-          if (playerRef.current) {
-            try {
-              playerRef.current.stopVideo()
-              playerRef.current.pauseVideo()
-            } catch (e) {
-              console.error("Error stopping old player:", e)
-            }
-          }
-          
-          // Swap player refs: next player becomes current player
-          // The next player is already playing the correct video in nextPlayerContainerRef
-          // After swap, playerRef.current points to the playing player (in nextPlayerContainerRef div)
-          playerRef.current = nextPlayerRef.current
-          nextPlayerRef.current = null
-          
-          // Switch to next track state
-          setTimeout(() => {
-            try {
-              console.log("Switching to next track after transition - swapping players")
-              setPlaybackState({
-                currentSectionIndex: nextTrack.sectionIndex,
-                currentTrackIndex: nextTrack.trackIndex,
-                isPlaying: true,
-                currentTime: 0,
-                autoAdvance: playbackState.autoAdvance,
-              })
-              // After swapping player refs:
-              // - playerRef.current now points to the player that was in nextPlayerContainerRef
-              // - That player is already playing and is in the div that nextPlayerContainerRef points to
-              // 
-              // For subsequent transitions to work, we need to handle container swap correctly:
-              // Option 1: Keep containersSwapped=true (current track in nextPlayerContainerRef)
-              // Option 2: Actually swap containers back so current track is in playerContainerRef
-              //
-              // Since containers are hidden for audio-only, we'll use a simpler approach:
-              // Just mark that containers are swapped, and when starting next transition,
-              // we'll properly handle the reset
-              
-              setNextTrack(null)
-              isTransitioningRef.current = false
-              
-              // Toggle containersSwapped state after transition
-              // If containersSwapped was false: next player was in nextPlayerContainerRef, so after swap it's true
-              // If containersSwapped was true: next player was in playerContainerRef, so after swap it's false
-              setContainersSwapped(prev => {
-                const newValue = !prev
-                console.log(`Transition complete - toggling containersSwapped from ${prev} to ${newValue}`)
-                return newValue
-              })
-              setCurrentPlayerOpacity(1)
-              setNextPlayerOpacity(0)
-              
-              console.log("Transition complete - playerRef points to new current track")
-              
-              // Clear the transition completion flag after a delay
-              // This allows the track change effect to recognize the transition is complete
-              setTimeout(() => {
-                isCompletingTransitionRef.current = false
-              }, 1000)
-            } catch (e) {
-              console.error("Error updating state after transition:", e)
-              isCompletingTransitionRef.current = false
-            }
-          }, 100)
-        } catch (e) {
-          console.error("Error completing transition:", e)
-          isTransitioningRef.current = false
-          isCompletingTransitionRef.current = false
-        }
+      // If we're mid-crossfade, ending should just finalize once.
+      if (isTransitioningRef.current) {
+        setCurrentPlayerOpacity(0)
+        setNextPlayerOpacity(1)
+        finalizeTransition("ended")
         return
       }
 
@@ -285,21 +271,23 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
     // Store handler in ref so it can be called from YouTube API
     handleVideoEndedRef.current = handleVideoEnded
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbackState.autoAdvance, playbackState.currentSectionIndex, playbackState.currentTrackIndex, playlist.sections, nextTrack])
+  }, [playbackState.autoAdvance, playbackState.currentSectionIndex, playbackState.currentTrackIndex, playlist.sections, finalizeTransition])
 
   // Always track video progress for progress bar (regardless of transition settings)
   useEffect(() => {
-    if (!playbackState.isPlaying || !playerRef.current) {
+    const progressPlayer = isTransitioningRef.current && nextPlayerRef.current ? nextPlayerRef.current : playerRef.current
+    if (!playbackState.isPlaying || !progressPlayer) {
       return
     }
 
     // Check video progress every 100ms for progress bar
     const updateProgress = setInterval(() => {
-      if (!playerRef.current) return
+      const p = isTransitioningRef.current && nextPlayerRef.current ? nextPlayerRef.current : playerRef.current
+      if (!p) return
 
       try {
-        const duration = playerRef.current.getDuration()
-        const currentTime = playerRef.current.getCurrentTime()
+        const duration = p.getDuration()
+        const currentTime = p.getCurrentTime()
         
         // Validate duration and currentTime
         if (!duration || isNaN(duration) || duration <= 0) {
@@ -323,12 +311,15 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         clearInterval(updateProgress)
       }
     }
-  }, [playbackState.isPlaying, currentTrack?.videoId])
+  }, [playbackState.isPlaying, currentTrack?.videoId, isTransitioning])
 
   // Monitor video progress and start fade transitions
   useEffect(() => {
     if (!playbackState.isPlaying || !playbackState.autoAdvance || !playerRef.current || !currentTrack) {
       console.log("Transition monitoring skipped - isPlaying:", playbackState.isPlaying, "autoAdvance:", playbackState.autoAdvance, "playerRef:", !!playerRef.current, "currentTrack:", !!currentTrack)
+      return
+    }
+    if (isTransitioning) {
       return
     }
     console.log("Starting transition monitoring for track:", currentTrack.videoId)
@@ -384,6 +375,8 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         if (timeRemaining <= nextTrackTransitionTime && timeRemaining > 0 && !isTransitioningRef.current) {
           console.log(`Starting fade transition: ${timeRemaining.toFixed(1)}s remaining, using NEXT track's transition time: ${nextTrackTransitionTime}s (current track had: ${freshTransitionTime}s)`)
           isTransitioningRef.current = true
+          setIsTransitioning(true)
+          hasFinalizedTransitionRef.current = false
           pendingNextTrackRef.current = next
 
           console.log("Transition: Next track will be section:", next.sectionIndex, "track:", next.trackIndex)
@@ -399,6 +392,8 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
           if (!nextTrackData) {
             console.error("Next track data not found for section:", next.sectionIndex, "track:", next.trackIndex)
             isTransitioningRef.current = false
+            setIsTransitioning(false)
+            pendingNextTrackRef.current = null
             return
           }
           console.log("Transition: Next track video ID:", nextTrackData.videoId, "track ID:", nextTrackData.id, "track title:", nextTrackData.title)
@@ -432,9 +427,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
           const capturedTransitionTime = nextTrackData.transitionTime || 0
           console.log("Using transition time from NEXT track:", capturedTransitionTime, "s (current track had:", freshTransitionTime, "s)")
           
-          // Set next track first to render the container
-          setNextTrack(next)
-          // Small delay to ensure React has rendered the container
+          // Small delay to ensure DOM is stable
           setTimeout(() => {
             // Now initialize the player
             if (window.YT && window.YT.Player) {
@@ -449,71 +442,6 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
               }, 100)
             }
           }, 50)
-
-          // Start fade transition function (defined before use)
-          const finalizeTransitionAfterFade = () => {
-            const pending = pendingNextTrackRef.current
-            if (!pending) {
-              console.warn("Finalize transition skipped - no pendingNextTrackRef")
-              return
-            }
-            if (!nextPlayerRef.current) {
-              console.warn("Finalize transition skipped - nextPlayerRef is null")
-              return
-            }
-
-            console.log("Fade complete - finalizing transition (swap refs + update playbackState)")
-
-            // Prevent the track-change effect from reloading while we swap
-            isCompletingTransitionRef.current = true
-
-            // Update lastVideoIdRef to the incoming track to avoid re-loads
-            const incomingTrack = playlist.sections[pending.sectionIndex]?.tracks[pending.trackIndex]
-            if (incomingTrack) {
-              lastVideoIdRef.current = incomingTrack.videoId
-            }
-
-            // Stop old player (it's faded out)
-            if (playerRef.current) {
-              try {
-                playerRef.current.pauseVideo()
-                playerRef.current.stopVideo()
-              } catch (e) {
-                // ignore
-              }
-            }
-
-            // Swap refs: next becomes current
-            playerRef.current = nextPlayerRef.current
-            nextPlayerRef.current = null
-
-            // Reset state for next cycle
-            pendingNextTrackRef.current = null
-            setNextTrack(null)
-            isTransitioningRef.current = false
-
-            // Toggle container mapping so future transitions pick the correct container
-            setContainersSwapped(prev => !prev)
-
-            // Make sure UI opacities are reset
-            setCurrentPlayerOpacity(1)
-            setNextPlayerOpacity(0)
-
-            // Update the "current track" in UI to match what is now playing
-            setPlaybackState(prev => ({
-              currentSectionIndex: pending.sectionIndex,
-              currentTrackIndex: pending.trackIndex,
-              isPlaying: true,
-              currentTime: 0,
-              autoAdvance: prev.autoAdvance,
-            }))
-            isPlayingRef.current = true
-
-            // Clear completion guard shortly after commit
-            setTimeout(() => {
-              isCompletingTransitionRef.current = false
-            }, 500)
-          }
 
           const startFadeTransition = (fadeDuration: number) => {
             console.log(`Starting fade transition over ${fadeDuration} seconds`)
@@ -569,8 +497,8 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                       // Ignore
                     }
                   }
-                  // IMPORTANT: finalize the transition now so UI + progress bar match the track that's audible
-                  finalizeTransitionAfterFade()
+                  // IMPORTANT: finalize exactly once
+                  finalizeTransition("fadeComplete")
                 }
               } catch (e) {
                 console.error("Error in fade transition:", e)
@@ -683,6 +611,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                 if (!targetContainer) {
                   console.error("Failed to get/create container")
                   isTransitioningRef.current = false
+                  setIsTransitioning(false)
                   return
                 }
                 
@@ -728,21 +657,36 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                               console.log("Transition cancelled, not starting playback")
                               return
                             }
+                            // Update UI immediately when the next track starts (don't wait for fadeDuration)
+                            const pending = pendingNextTrackRef.current
+                            if (pending) {
+                              lastVideoIdRef.current = capturedVideoId
+                              setPlaybackState(prev => ({
+                                currentSectionIndex: pending.sectionIndex,
+                                currentTrackIndex: pending.trackIndex,
+                                isPlaying: true,
+                                currentTime: 0,
+                                autoAdvance: prev.autoAdvance,
+                              }))
+                            }
                             event.target.playVideo()
                             // Start fade after player is ready
                             startFadeTransition(capturedTransition)
                           } else {
                             console.error("onReady event.target is null!")
                             isTransitioningRef.current = false
+                            setIsTransitioning(false)
                           }
                         } catch (e) {
                           console.error("Error in onReady callback:", e)
                           isTransitioningRef.current = false
+                          setIsTransitioning(false)
                         }
                       },
                       onError: (event: YT.OnErrorEvent) => {
                         console.error("Next player error for video:", capturedVideoId, "error code:", event.data)
                         isTransitioningRef.current = false
+                        setIsTransitioning(false)
                       },
                       onStateChange: (event: YT.OnStateChangeEvent) => {
                         console.log("Next player state changed:", event.data, "for video:", capturedVideoId)
@@ -778,6 +722,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                 } catch (e) {
                   console.error("Error creating next player for video:", videoIdToLoad, "error:", e)
                   isTransitioningRef.current = false
+                  setIsTransitioning(false)
                 }
               })
             })
@@ -799,7 +744,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbackState.isPlaying, playbackState.autoAdvance, currentTrack?.videoId, currentTrack?.transitionTime, playlist])
+  }, [playbackState.isPlaying, playbackState.autoAdvance, currentTrack?.videoId, currentTrack?.transitionTime, playlist, isTransitioning])
 
   // Set up YouTube API callback
   useEffect(() => {
@@ -947,6 +892,12 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
   useEffect(() => {
     console.log("Track change effect triggered - currentTrack:", currentTrack?.videoId, "sectionIndex:", playbackState.currentSectionIndex, "trackIndex:", playbackState.currentTrackIndex, "isCompletingTransition:", isCompletingTransitionRef.current, "containersSwapped:", containersSwapped)
     
+    // During crossfade we intentionally keep the old player running; don't reload anything.
+    if (isTransitioningRef.current) {
+      console.log("Transition in progress - skipping reload/update")
+      return
+    }
+
     // Skip reload if we're completing a transition - the player refs have been swapped
     // After transition: playerRef points to the player in nextPlayerContainerRef (visible)
     // We need to ensure the playing video stays visible and properly becomes the "current" player
@@ -1016,8 +967,8 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
       // Reset transition state
       setCurrentPlayerOpacity(1)
       setNextPlayerOpacity(0)
-      setNextTrack(null)
       isTransitioningRef.current = false
+      setIsTransitioning(false)
       
       // Clean up fade timer
       if (fadeTimerRef.current) {
@@ -1299,7 +1250,7 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
                   <p className="text-sm text-gray-600">
                     {currentSection?.title} • Transition: {currentTrack.transitionTime}s
                   </p>
-                  {isTransitioningRef.current && (
+                  {isTransitioning && (
                     <motion.div
                       initial={{ scale: 0.8, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
