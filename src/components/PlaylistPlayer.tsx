@@ -25,6 +25,12 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
     currentTime: 0,
     autoAdvance: true,
   })
+
+  // Always have the latest playbackState inside intervals/timeouts (avoid drift from closures)
+  const playbackStateRef = useRef<PlaybackState>(playbackState)
+  useEffect(() => {
+    playbackStateRef.current = playbackState
+  }, [playbackState])
   
   // Keep ref in sync with state
   useEffect(() => {
@@ -325,19 +331,14 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
       console.log("Transition monitoring skipped - isPlaying:", playbackState.isPlaying, "autoAdvance:", playbackState.autoAdvance, "playerRef:", !!playerRef.current, "currentTrack:", !!currentTrack)
       return
     }
-
-    const transitionTime = currentTrack.transitionTime || 0
-    if (transitionTime <= 0) {
-      console.log("Transition monitoring skipped - no transition time:", transitionTime)
-      return
-    }
-
-    console.log("Starting transition monitoring for track:", currentTrack.videoId, "transitionTime:", transitionTime)
+    console.log("Starting transition monitoring for track:", currentTrack.videoId)
 
     // Check video progress every 100ms for transition detection
     const checkProgress = setInterval(() => {
-      // Get fresh currentTrack from state to avoid stale closures
-      const freshTrack = getCurrentTrack()
+      const stateNow = playbackStateRef.current
+      const freshTrack =
+        playlist.sections[stateNow.currentSectionIndex]?.tracks[stateNow.currentTrackIndex] || null
+
       if (!playerRef.current || !freshTrack) {
         return
       }
@@ -355,11 +356,11 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         }
         
         const timeRemaining = duration - currentTime
-        const freshTransitionTime = freshTrack.transitionTime || 0
+        const freshTransitionTime = Number(freshTrack.transitionTime) || 0
 
         // Get next track FIRST to check its transition time (before checking if we should start transition)
         // This ensures we use the NEXT track's transition time to determine when to start the transition
-        const next = getNextTrack(playbackState)
+        const next = getNextTrack(stateNow)
         if (!next) {
           return // No next track, nothing to transition to
         }
@@ -367,7 +368,12 @@ export function PlaylistPlayer({ playlist }: PlaylistPlayerProps) {
         // Get the NEXT track's transition time to determine when to start the transition
         const targetSection = playlist.sections[next.sectionIndex]
         const nextTrackData = targetSection?.tracks[next.trackIndex]
-        const nextTrackTransitionTime = nextTrackData?.transitionTime || 0
+        const nextTrackTransitionTime = Number(nextTrackData?.transitionTime) || 0
+
+        // If NEXT track has no transition time, don't start a fade
+        if (nextTrackTransitionTime <= 0) {
+          return
+        }
 
         // Log progress occasionally for debugging
         if (Math.abs(timeRemaining % 1) < 0.1) { // Log roughly every second
